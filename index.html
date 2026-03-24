@@ -157,10 +157,11 @@
 </div>
 
 <!-- Error -->
-<div id="error-msg" style="display:none;flex-direction:column;">
-  <h2>No se pudo cargar la data</h2>
-  <p>Verifica que el Google Sheet esté publicado correctamente en Archivo → Compartir → Publicar en la web.</p>
-  <button onclick="location.reload()">Reintentar</button>
+<div id="error-msg" style="display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;position:fixed;inset:0;background:var(--bg);z-index:99;">
+  <h2 style="color:var(--red);font-size:18px;">No se pudo cargar la data</h2>
+  <p style="color:var(--muted);font-size:13px;max-width:480px;text-align:center;">Verifica que el Google Sheet esté publicado en <strong>Archivo → Compartir → Publicar en la web</strong>.</p>
+  <p id="error-detail" style="color:var(--amber);font-size:11px;max-width:480px;text-align:center;font-family:monospace;background:var(--surface2);padding:8px 12px;border-radius:6px;"></p>
+  <button onclick="loadAll()" style="margin-top:8px;padding:8px 20px;background:var(--blue);color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;">↻ Reintentar</button>
 </div>
 
 <!-- Header -->
@@ -739,36 +740,81 @@ function render(avance, seguimiento, paradas) {
 }
 
 // ─── Error handler ────────────────────────────────────────────────────────
-function showError() {
+function showError(msg) {
   document.getElementById('loader').style.display = 'none';
-  document.getElementById('error-msg').style.display = 'flex';
+  const errEl = document.getElementById('error-msg');
+  errEl.style.display = 'flex';
+  if (msg) document.getElementById('error-detail').textContent = msg;
+}
+
+// ─── Safe fetch with multiple CORS proxy fallbacks ────────────────────────
+async function safeFetch(url) {
+  const attempts = [
+    // 1. Direct
+    () => fetch(url, { cache: 'no-store' }),
+    // 2. allorigins (most reliable for Google Sheets)
+    () => fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(url), { cache: 'no-store' }),
+    // 3. corsproxy.io
+    () => fetch('https://corsproxy.io/?' + encodeURIComponent(url), { cache: 'no-store' }),
+    // 4. thingproxy
+    () => fetch('https://thingproxy.freeboard.io/fetch/' + url, { cache: 'no-store' }),
+  ];
+
+  const errors = [];
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      const r = await attempts[i]();
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const text = await r.text();
+      if (text.length < 20) throw new Error('Respuesta vacía');
+      // allorigins sometimes wraps in JSON
+      if (text.trim().startsWith('{"contents"')) {
+        return JSON.parse(text).contents;
+      }
+      return text;
+    } catch (e) {
+      errors.push(`Intento ${i+1}: ${e.message}`);
+    }
+  }
+  throw new Error(errors.join(' | '));
 }
 
 // ─── Main loader ──────────────────────────────────────────────────────────
 async function loadAll() {
   document.getElementById('loader').style.display = 'flex';
+  document.getElementById('loader').querySelector('p').textContent = 'Conectando con Google Sheets…';
   document.getElementById('error-msg').style.display = 'none';
   document.getElementById('main-content').style.display = 'none';
 
-  try {
-    const [r1, r2, r3] = await Promise.all([
-      fetch(URL_AVANCE).then(r => r.text()),
-      fetch(URL_SEGUIMIENTO).then(r => r.text()),
-      fetch(URL_KBA1).then(r => r.text())
-    ]);
+  let r1 = '', r2 = '', r3 = '';
 
+  try {
+    document.getElementById('loader').querySelector('p').textContent = 'Cargando hoja AVANCE…';
+    r1 = await safeFetch(URL_AVANCE);
+  } catch(e) {
+    showError('No se pudo cargar la hoja AVANCE. Detalle: ' + e.message); return;
+  }
+  try {
+    document.getElementById('loader').querySelector('p').textContent = 'Cargando hoja SEGUIMIENTO…';
+    r2 = await safeFetch(URL_SEGUIMIENTO);
+  } catch(e) {
+    showError('No se pudo cargar SEGUIMIENTO. Detalle: ' + e.message); return;
+  }
+  try {
+    document.getElementById('loader').querySelector('p').textContent = 'Cargando hoja KBA 01…';
+    r3 = await safeFetch(URL_KBA1);
+  } catch(e) {
+    showError('No se pudo cargar KBA 01. Detalle: ' + e.message); return;
+  }
+
+  try {
+    document.getElementById('loader').querySelector('p').textContent = 'Procesando datos…';
     const avanceRows      = parseCSV(r1);
     const seguimientoRows = parseCSV(r2);
     const kba1Rows        = parseCSV(r3);
 
-    // Auto-detect which URL is AVANCE vs SEGUIMIENTO
-    // AVANCE has "HORAS PROGRAMADAS" or "IMPRESION" header
-    // SEGUIMIENTO has "PROGRAMADO" and "REAL" as simple columns
-    let avData, segData;
-
     const r1flat = r1.toLowerCase();
-    const r2flat = r2.toLowerCase();
-
+    let avData, segData;
     if (r1flat.includes('horas') || r1flat.includes('impresión') || r1flat.includes('impresion')) {
       avData  = parseAvance(avanceRows);
       segData = parseSeguimiento(seguimientoRows);
@@ -777,12 +823,16 @@ async function loadAll() {
       segData = parseSeguimiento(avanceRows);
     }
 
+    if (avData.length === 0) {
+      showError(`Se cargó el CSV pero no se encontraron filas de datos válidos en AVANCE. Filas recibidas: ${avanceRows.length}. Primer valor col 0: "${avanceRows[6]?.[0]}"`);
+      return;
+    }
+
     const paradas = parseParadas(kba1Rows);
     render(avData, segData, paradas);
-
-  } catch (e) {
+  } catch(e) {
+    showError('Error al procesar datos: ' + e.message);
     console.error(e);
-    showError();
   }
 }
 
