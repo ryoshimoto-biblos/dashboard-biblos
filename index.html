@@ -290,10 +290,11 @@
 </div><!-- /main -->
 
 <script>
-// ─── URLs Google Sheets CSV ────────────────────────────────────────────────
-const URL_AVANCE     = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQqMUp-iFLa663n8hxAJ-eEaa47q7Ch2EwJ8LoKsa4mGRE0_5bjXCefgUXiF7b1rLpkKCNKYeK2eK6L/pub?gid=1670133625&single=true&output=csv';
-const URL_SEGUIMIENTO = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQqMUp-iFLa663n8hxAJ-eEaa47q7Ch2EwJ8LoKsa4mGRE0_5bjXCefgUXiF7b1rLpkKCNKYeK2eK6L/pub?gid=1910685458&single=true&output=csv';
-const URL_KBA1       = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQqMUp-iFLa663n8hxAJ-eEaa47q7Ch2EwJ8LoKsa4mGRE0_5bjXCefgUXiF7b1rLpkKCNKYeK2eK6L/pub?gid=0&single=true&output=csv';
+// ─── Apps Script Web App URL ───────────────────────────────────────────────
+const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbx_EQ8MLZa4o3_vAF6Mz6xJfugyJGvD8DWXXf1aQG5KvoPfArxOaxHX-Dgzqpxh_rkC/exec';
+const URL_AVANCE      = SCRIPT_URL + '?sheet=AVANCE';
+const URL_SEGUIMIENTO = SCRIPT_URL + '?sheet=SEGUIMIENTO ';
+const URL_KBA1        = SCRIPT_URL + '?sheet=KBA 01';
 
 // ─── Chart instances ───────────────────────────────────────────────────────
 let charts = {};
@@ -747,36 +748,13 @@ function showError(msg) {
   if (msg) document.getElementById('error-detail').textContent = msg;
 }
 
-// ─── Safe fetch with multiple CORS proxy fallbacks ────────────────────────
+// ─── Fetch via Apps Script (no CORS issues) ──────────────────────────────
 async function safeFetch(url) {
-  const attempts = [
-    // 1. Direct
-    () => fetch(url, { cache: 'no-store' }),
-    // 2. allorigins (most reliable for Google Sheets)
-    () => fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(url), { cache: 'no-store' }),
-    // 3. corsproxy.io
-    () => fetch('https://corsproxy.io/?' + encodeURIComponent(url), { cache: 'no-store' }),
-    // 4. thingproxy
-    () => fetch('https://thingproxy.freeboard.io/fetch/' + url, { cache: 'no-store' }),
-  ];
-
-  const errors = [];
-  for (let i = 0; i < attempts.length; i++) {
-    try {
-      const r = await attempts[i]();
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const text = await r.text();
-      if (text.length < 20) throw new Error('Respuesta vacía');
-      // allorigins sometimes wraps in JSON
-      if (text.trim().startsWith('{"contents"')) {
-        return JSON.parse(text).contents;
-      }
-      return text;
-    } catch (e) {
-      errors.push(`Intento ${i+1}: ${e.message}`);
-    }
-  }
-  throw new Error(errors.join(' | '));
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const text = await r.text();
+  if (text.length < 10) throw new Error('Respuesta vacía');
+  return text;
 }
 
 // ─── Main loader ──────────────────────────────────────────────────────────
