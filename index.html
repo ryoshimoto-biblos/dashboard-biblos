@@ -299,20 +299,32 @@ const URL_KBA1        = SCRIPT_URL + '?sheet=KBA 01';
 // ─── Chart instances ───────────────────────────────────────────────────────
 let charts = {};
 
-// ─── CSV parser ───────────────────────────────────────────────────────────
+// ─── CSV parser (RFC-4180 — handles multiline quoted fields) ───────────────
 function parseCSV(text) {
-  const lines = text.split('\n');
-  return lines.map(line => {
-    const cols = []; let cur = ''; let inQ = false;
-    for (let i = 0; i < line.length; i++) {
-      const c = line[i];
-      if (c === '"') { inQ = !inQ; continue; }
-      if (c === ',' && !inQ) { cols.push(cur.trim()); cur = ''; }
-      else cur += c;
+  // Normalize line endings
+  text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const rows = [];
+  let row = [], cur = '', inQ = false, i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') {
+        if (text[i+1] === '"') { cur += '"'; i += 2; continue; } // escaped quote
+        inQ = false; i++; continue;
+      }
+      cur += c; i++; // keep newlines inside quotes as space
+    } else {
+      if (c === '"') { inQ = true; i++; continue; }
+      if (c === ',') { row.push(cur.trim()); cur = ''; i++; continue; }
+      if (c === '\n') {
+        row.push(cur.trim()); cur = '';
+        rows.push(row); row = []; i++; continue;
+      }
+      cur += c; i++;
     }
-    cols.push(cur.trim());
-    return cols;
-  });
+  }
+  if (cur.trim() || row.length) { row.push(cur.trim()); rows.push(row); }
+  return rows;
 }
 
 // Convert time string or Excel/Sheets fraction to hours
@@ -369,45 +381,27 @@ function parseDate(s) {
 // ─── PARSE AVANCE ──────────────────────────────────────────────────────────
 function parseAvance(rows) {
   const result = [];
-
-  // Find first data row: scan all rows looking for a date in col 0
-  // Also try col 0 of every row regardless of header detection
-  let dataStart = -1;
-
-  // First: try to find "FECHA" header
+  // Scan every row — pick ones where col 0 looks like a date (ignore all headers)
   for (let i = 0; i < rows.length; i++) {
-    const v = (rows[i][0] || '').toString().toUpperCase().trim();
-    if (v === 'FECHA') { dataStart = i + 1; break; }
-  }
-
-  // Fallback: find first row where col 0 looks like a date
-  if (dataStart === -1) {
-    for (let i = 0; i < rows.length; i++) {
-      if (isDateLike((rows[i][0] || '').toString())) { dataStart = i; break; }
-    }
-  }
-
-  if (dataStart === -1) dataStart = 6;
-
-  for (let i = dataStart; i < rows.length; i++) {
     const r = rows[i];
     const dateStr = (r[0] || '').toString().trim();
     if (!isDateLike(dateStr)) continue;
     const fecha = parseDate(dateStr);
-    if (!fecha || fecha.getFullYear() < 2020) continue;
+    if (!fecha || fecha.getFullYear() < 2022 || fecha.getFullYear() > 2030) continue;
 
     const k1p = toHours(r[1]);
     const k1i = toHours(r[2]);
     const k2p = toHours(r[6]);
     const k2i = toHours(r[7]);
 
+    // Need at least one valid programmed hour
     if ((isNaN(k1p) || k1p === 0) && (isNaN(k2p) || k2p === 0)) continue;
     result.push({
       fecha,
-      k1p: isNaN(k1p)?0:k1p,
-      k1i: isNaN(k1i)?0:k1i,
-      k2p: isNaN(k2p)?0:k2p,
-      k2i: isNaN(k2i)?0:k2i
+      k1p: isNaN(k1p) ? 0 : k1p,
+      k1i: isNaN(k1i) ? 0 : k1i,
+      k2p: isNaN(k2p) ? 0 : k2p,
+      k2i: isNaN(k2i) ? 0 : k2i
     });
   }
   return result;
@@ -416,25 +410,17 @@ function parseAvance(rows) {
 // ─── PARSE SEGUIMIENTO (tiraje) ────────────────────────────────────────────
 function parseSeguimiento(rows) {
   const result = [];
-  let dataStart = -1;
   for (let i = 0; i < rows.length; i++) {
-    if (rows[i][0] && rows[i][0].toString().toUpperCase().includes('FECHA')) {
-      dataStart = i + 1; break;
-    }
-  }
-  if (dataStart === -1) dataStart = 2;
-
-  for (let i = dataStart; i < rows.length; i++) {
     const r = rows[i];
-    const dateStr = r[0];
-    if (!dateStr || !isDateLike(dateStr)) continue;
+    const dateStr = (r[0] || '').toString().trim();
+    if (!isDateLike(dateStr)) continue;
     const fecha = parseDate(dateStr);
-    if (!fecha) continue;
+    if (!fecha || fecha.getFullYear() < 2022 || fecha.getFullYear() > 2030) continue;
     const prog = parseFloat(r[1]);
     const real = parseFloat(r[2]);
-    const pct  = parseFloat(r[4]);
     if (isNaN(prog) || prog === 0) continue;
-    result.push({ fecha, prog, real: isNaN(real)?0:real, pct: isNaN(pct)?real/prog:pct });
+    const pct = parseFloat(r[4]);
+    result.push({ fecha, prog, real: isNaN(real) ? 0 : real, pct: isNaN(pct) ? real/prog : pct });
   }
   return result;
 }
@@ -836,7 +822,11 @@ async function loadAll() {
     }
 
     if (avData.length === 0) {
-      showError(`Se cargó el CSV pero no se encontraron filas de datos válidos en AVANCE. Filas recibidas: ${avanceRows.length}. Primer valor col 0: "${avanceRows[6]?.[0]}"`);
+      (() => {
+      // Debug: find first row that has any content
+      const sample = avanceRows.slice(0,10).map((r,i) => `[${i}] "${(r[0]||'').substring(0,40)}"`).join(' | ');
+      showError(`CSV cargado (${avanceRows.length} filas) pero sin fechas válidas. Primeras 10 filas col 0: ${sample}`);
+    })();
       return;
     }
 
