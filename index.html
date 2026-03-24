@@ -315,36 +315,53 @@ function parseCSV(text) {
   });
 }
 
-// Convert time string or Excel fraction to hours
+// Convert time string or Excel/Sheets fraction to hours
 function toHours(val) {
-  if (!val || val === '') return NaN;
-  // Excel time fraction (0.916... = 22h)
-  if (/^0\.\d+$/.test(val)) return parseFloat(val) * 24;
-  if (/^\d+\.\d+$/.test(val)) {
-    const n = parseFloat(val);
-    return n > 1 ? (n - Math.floor(n)) * 24 + Math.floor(n) * 24 : n * 24;
+  if (val === null || val === undefined || val === '') return NaN;
+  const s = val.toString().trim();
+  if (s === '' || s === '0') return 0;
+  // Pure decimal fraction (Sheets stores time as 0.916... = 22h)
+  if (/^0\.\d+$/.test(s)) return parseFloat(s) * 24;
+  // Number > 1 with decimal (days + fraction, e.g. "1.5" = 36h)
+  if (/^\d+\.\d+$/.test(s)) {
+    const n = parseFloat(s);
+    return n > 1 ? Math.floor(n)*24 + (n - Math.floor(n))*24 : n*24;
+  }
+  // Plain integer hours (e.g. "22")
+  if (/^\d+$/.test(s)) {
+    const n = parseInt(s);
+    return n <= 24 ? n : NaN; // sanity: reject huge numbers
   }
   // "HH:MM:SS" or "H:MM:SS"
-  const m = val.match(/^(\d+):(\d+):(\d+)/);
+  const m = s.match(/^(\d+):(\d+):(\d+)/);
   if (m) return parseInt(m[1]) + parseInt(m[2])/60 + parseInt(m[3])/3600;
   // "HH:MM"
-  const m2 = val.match(/^(\d+):(\d+)$/);
+  const m2 = s.match(/^(\d+):(\d+)$/);
   if (m2) return parseInt(m2[1]) + parseInt(m2[2])/60;
   return NaN;
 }
 
 function isDateLike(s) {
-  return /^\d{1,2}\/\d{1,2}\/\d{4}/.test(s) || /^\d{4}-\d{2}-\d{2}/.test(s) || /^\d{1,2}-[A-Za-z]+-\d{4}/.test(s);
+  if (!s || typeof s !== 'string') return false;
+  return /^\d{1,2}\/\d{1,2}\/\d{4}/.test(s)   // DD/MM/YYYY or MM/DD/YYYY
+      || /^\d{4}-\d{2}-\d{2}/.test(s)           // YYYY-MM-DD
+      || /^\d{1,2}-[A-Za-z]+-\d{4}/.test(s);   // DD-Mon-YYYY
 }
 
 function parseDate(s) {
   if (!s) return null;
-  // MM/DD/YYYY
-  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-  if (m) return new Date(+m[3], +m[1]-1, +m[2]);
-  // YYYY-MM-DD
-  m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  s = s.trim();
+  // YYYY-MM-DD (ISO)
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (m) return new Date(+m[1], +m[2]-1, +m[3]);
+  // D/M/YYYY or DD/MM/YYYY — Google Sheets Peru locale exports this way
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) {
+    // Ambiguous: try DD/MM/YYYY first (Peru), fall back to MM/DD/YYYY
+    const d1 = new Date(+m[3], +m[2]-1, +m[1]);
+    if (d1.getFullYear() === +m[3]) return d1;
+    return new Date(+m[3], +m[1]-1, +m[2]);
+  }
   const d = new Date(s);
   return isNaN(d) ? null : d;
 }
@@ -352,29 +369,46 @@ function parseDate(s) {
 // ─── PARSE AVANCE ──────────────────────────────────────────────────────────
 function parseAvance(rows) {
   const result = [];
-  // Find header row (has "FECHA" in col 0)
+
+  // Find first data row: scan all rows looking for a date in col 0
+  // Also try col 0 of every row regardless of header detection
   let dataStart = -1;
+
+  // First: try to find "FECHA" header
   for (let i = 0; i < rows.length; i++) {
-    if (rows[i][0] && rows[i][0].toString().toUpperCase().includes('FECHA')) {
-      dataStart = i + 1; break;
+    const v = (rows[i][0] || '').toString().toUpperCase().trim();
+    if (v === 'FECHA') { dataStart = i + 1; break; }
+  }
+
+  // Fallback: find first row where col 0 looks like a date
+  if (dataStart === -1) {
+    for (let i = 0; i < rows.length; i++) {
+      if (isDateLike((rows[i][0] || '').toString())) { dataStart = i; break; }
     }
   }
-  if (dataStart === -1) dataStart = 6; // fallback
+
+  if (dataStart === -1) dataStart = 6;
 
   for (let i = dataStart; i < rows.length; i++) {
     const r = rows[i];
-    const dateStr = r[0];
-    if (!dateStr || !isDateLike(dateStr)) continue;
+    const dateStr = (r[0] || '').toString().trim();
+    if (!isDateLike(dateStr)) continue;
     const fecha = parseDate(dateStr);
-    if (!fecha) continue;
+    if (!fecha || fecha.getFullYear() < 2020) continue;
 
     const k1p = toHours(r[1]);
     const k1i = toHours(r[2]);
     const k2p = toHours(r[6]);
     const k2i = toHours(r[7]);
 
-    if (isNaN(k1p) && isNaN(k2p)) continue;
-    result.push({ fecha, k1p: isNaN(k1p)?0:k1p, k1i: isNaN(k1i)?0:k1i, k2p: isNaN(k2p)?0:k2p, k2i: isNaN(k2i)?0:k2i });
+    if ((isNaN(k1p) || k1p === 0) && (isNaN(k2p) || k2p === 0)) continue;
+    result.push({
+      fecha,
+      k1p: isNaN(k1p)?0:k1p,
+      k1i: isNaN(k1i)?0:k1i,
+      k2p: isNaN(k2p)?0:k2p,
+      k2i: isNaN(k2i)?0:k2i
+    });
   }
   return result;
 }
